@@ -17,6 +17,31 @@ nixl_agent_config: Any
 nixlXferTelemetry: Any
 
 
+def _cpu_supports_avx() -> bool:
+    """Return True if the current CPU likely supports AVX.
+
+    Conservative: return True on non-x86 platforms or when the check
+    cannot be performed. Only returns False when running on an x86
+    machine and /proc/cpuinfo explicitly lacks the 'avx' flag.
+    """
+    try:
+        import platform
+
+        machine = platform.machine().lower()
+    except Exception:
+        return True
+
+    if machine not in ("x86_64", "amd64", "i386", "i686"):
+        return True
+
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            data = f.read().lower()
+        return "avx" in data
+    except Exception:
+        return True
+
+
 def _maybe_set_ucx_rcache_limit() -> None:
     if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
         return
@@ -53,6 +78,18 @@ def _load_nixl_attr(name: str) -> Any:
         "nixl_agent_config": "nixl_agent_config",
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
+
+    # Avoid importing NIXL/UCX on x86 CPUs that don't advertise AVX support.
+    # UCX may abort the process at native init time if it was compiled with
+    # AVX but the CPU lacks it. In that case, skip loading NIXL and return
+    # None so vLLM can continue without KV connectors.
+    if not _cpu_supports_avx():
+        logger.warning_once(
+            "Detected x86 CPU without AVX; skipping NIXL import to avoid "
+            "a native UCX crash."
+        )
+        globals()[name] = None
+        return None
 
     _maybe_set_ucx_rcache_limit()
     try:
